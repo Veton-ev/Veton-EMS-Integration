@@ -30,7 +30,14 @@ curl "http://127.0.0.1:5555/api/v1.0/charging-controllers/<UID>/control?param_li
 curl -X PUT http://127.0.0.1:5555/api/v1.0/charging-controllers/<UID>/control \
      -H 'Content-Type: application/json' \
      -d '{"external_release": true}'
+```
 
+> ⚠️ **On Veton chargers, don't drive `external_release`.** Charging release
+> stays with **OCPP** (see [ocpp.md](ocpp.md)) — `external_release` is another
+> release-control door, just like Modbus `X300`/`X304`. Shown for completeness
+> and for standalone **non-OCPP** setups only.
+
+```bash
 # Read / write load-management config (watchdog params take; maximum_current is owned by LM and dropped)
 curl "http://127.0.0.1:5555/api/v1.0/charging-controllers/<UID>/load-management-config?param_list=maximum_current,maximum_current_on_expired_watchdog,watchdog_timer_sec"
 ```

@@ -1,8 +1,13 @@
 # Modbus TCP
 
-The CHARX controller exposes a Modbus/TCP server. This is the **primary,
-always-available** interface for an EMS: read metering and status, set the
-charging current, drive charging release, and arm the safety watchdog.
+The CHARX controller exposes a Modbus/TCP server. This is the **primary**
+interface for an EMS — always available on Veton-provisioned chargers: read
+metering and status, set the charging current, and arm the safety watchdog.
+(Charging *release* stays with OCPP on Veton chargers — see below.)
+
+> **Port availability:** on factory firmware ≥ 1.8 the charger's firewall
+> allows only `:80`/`:443` until it is provisioned. Veton-provisioned chargers
+> have `:502` (and typically `:1883`/`:5555`) open.
 
 ```
 Host:           charger IP
@@ -14,8 +19,10 @@ Object type:    holding registers, 16-bit (FC03 read, FC06/FC16 write)
 
 ## Addressing: one charger, many charging points
 
-A CHARX master can host several charging points (controllers). Registers are
-laid out in 1000-register blocks:
+A CHARX master can host several charging points (controllers) — up to 48,
+including those on attached client ("slave") controllers. **There is only one
+Modbus server: the master's, on `:502`** — you never connect to a slave
+directly. Registers are laid out in 1000-register blocks:
 
 ```
 addresses 0   – 999   →  whole-installation / master data
@@ -71,9 +78,14 @@ def ascii_(regs):
 | `X289` | 4 | Energy of current charging session [Wh] |
 | `X293` | 2 | Error code (hex bitfield) |
 | `X296` | 1 | Current PWM duty cycle [%] |
-| `X297` | 1 | Present charging current [A] |
+| `X297` | 1 | Charging current currently **signalled to the vehicle via PWM** [A] — the offer, not the draw; actually drawn current is `X238`/`X240`/`X242` |
 | `X298` | 1 | Cable current-carrying capacity [A] |
-| `X299` | 1 | **Vehicle status** (ASCII: `A1 A2 B1 B2 C1 C2 D1 D2 E0 F0 IN`) |
+| `X299` | 1 | **Vehicle status** (ASCII: `A1 A2 B1 B2 C1 C2 E0 F0 IN`) |
+
+> **No D states on `X299`.** IEC 61851 also defines `D1`/`D2` (charging with
+> ventilation required), but the CHARX controller does not report them on
+> `X299` — vehicle-with-ventilation acceptance only exists as the `X109`
+> configuration flag.
 
 ### Write — control
 | Reg | Range | Meaning | Writable when |
@@ -86,10 +98,17 @@ def ascii_(regs):
 | `X307` | seconds | **Watchdog timer [s]** — re-write within the interval to keep alive; `65535` = disabled | always |
 
 > **`X301` is a cap that works in every release mode.** You can steer current
-> from an EMS without changing the release mode. To also **start/stop** charging
-> from Modbus (`X300`) or take a CP offline (`X304`), the charger must be in
-> **release mode = Modbus** (`X120 = 5`). Note `X301 = 0` withdraws charging
-> release regardless of release mode.
+> from an EMS without changing the release mode. Note `X301 = 0` withdraws
+> charging release regardless of release mode — never write 0; pause at the
+> 6 A minimum instead.
+
+> ⚠️ **On Veton chargers, don't use `X300`/`X304`.** Veton chargers ship with
+> **release mode = OCPP**: the OCPP backend decides *whether* a car may charge
+> (authorization, start/stop, billing, app visibility) and the EMS only decides
+> *how fast* via `X301`. Driving `X300`/`X304` requires taking release away
+> from OCPP, which breaks authorization, session/transaction records, and
+> app/backend visibility. The `X300`/`X303`/`X304` rows are documented for
+> completeness and for standalone **non-OCPP** deployments only.
 
 ## Master registers (addresses 0–999)
 
@@ -101,13 +120,20 @@ def ascii_(regs):
 | `147–151` | 1 each | Count of controllers in error / E-F / status A / occupied / charging |
 | `152` | 2 | Total active power [mW] |
 | `158 / 160 / 162` | 2 each | Total current L1 / L2 / L3 [mA] |
-| `164` | 1 | Availability gate (0 = force all CPs to F, 1 = normal) — R/W |
+| `164` | 1 | Availability gate (0 = force all CPs to F, 1 = normal) — R/W, but only writable when the availability gate is configured (`writeable_if: configured` in the Phoenix register map) |
 | `167` | 1 | **Dynamic max current for internal load management** [A], first load circuit. `65535` = no dynamic cap. R/W |
 
 > **Register 167** is the "cooperate with CHARX internal load management" path:
 > instead of driving each CP's `X301` yourself, write one site-wide budget and
 > let the charger's own LM distribute it across charging points. Use this if you
 > want a simple total-power limit rather than per-socket control.
+>
+> ⚠️ **Caveat:** register 167 only caps charging points **bound to the first
+> load circuit** in the charger's load-management config. If that circuit has
+> no charging points bound (common when another controller manages the
+> sockets), writes to 167 are accepted but **inert**. Verify the binding via
+> REST: `GET :1603/api/v1.0/loadmanagement/load_circuits` — `charging_points[]`
+> must contain the controller UIDs.
 
 ## Release modes
 
@@ -124,10 +150,17 @@ def ascii_(regs):
 | 5 | **Modbus** | Your Modbus client drives `X300` + `X301` |
 
 The release mode is set in the charger's Web UI / via [REST](rest-api.md), not
-over Modbus. Two common EMS patterns:
+over Modbus. Two EMS patterns:
 
-1. **Current-capping only** — leave release on OCPP/Whitelist, just write `X301`. The charger authorizes; you throttle.
-2. **Full Modbus control** — set release mode = Modbus, then drive `X300` (start/stop) + `X301` (current) yourself.
+1. **Current-capping only (✅ recommended on Veton chargers)** — leave the
+   release mode as shipped (**OCPP**), just write `X301`. OCPP authorizes and
+   starts/stops; you throttle. `X301` works in every release mode, so nothing
+   needs reconfiguring.
+2. **Full Modbus control (❌ not recommended on Veton chargers)** — set release
+   mode = Modbus, then drive `X300` (start/stop) + `X301` (current) yourself.
+   This takes release away from OCPP and breaks authorization, transaction
+   records/billing, and app/backend visibility. Only appropriate for standalone
+   deployments **without** an OCPP backend.
 
 ## Gotchas
 
@@ -137,7 +170,8 @@ over Modbus. Two common EMS patterns:
   read `X301` back** after writing and re-issue if it didn't stick. If it
   persistently reverts to 0, the only known fix is a controller power-cycle.
 - **`X301 = 0` blocks charging in every mode** — switching release mode does not
-  override a zero current cap.
+  override a zero current cap. Never write 0 from an EMS; pause at the 6 A
+  minimum instead (stopping a session is OCPP's job).
 - **32/64-bit word order is MSW-first.** Reading the low word first yields garbage.
 - **Currents return `-1`** at master level when phase rotation is unknown.
 

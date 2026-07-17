@@ -19,6 +19,8 @@ curl -s "http://${HOST}:5555/api/v1.0/charging-controllers"
 curl -s "http://${HOST}:5555/api/v1.0/charging-controllers/${UID_CP}/control?param_list=charge_enable,external_release,external_locking,external_status,force_unlocking"
 
 # Write a control flag (these stick). DO NOT set external_release=false with a car plugged in (→ fault F).
+# ⚠️ On Veton chargers charging release stays with OCPP — external_release is another
+#    release-control door; shown for completeness / standalone non-OCPP setups only.
 curl -s -X PUT "http://${HOST}:5555/api/v1.0/charging-controllers/${UID_CP}/control" \
      -H 'Content-Type: application/json' \
      -d '{"external_release": true}'

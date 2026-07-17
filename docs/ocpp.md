@@ -12,7 +12,7 @@ charging profiles).
 | Authorize users (RFID, app) | ✅ native | — |
 | Per-session billing / transactions | ✅ native | — |
 | Set a current limit | `SetChargingProfile` (TxProfile / TxDefaultProfile) | `X301` (simpler, lower latency) |
-| Start/stop remotely | `RemoteStart/StopTransaction` | `X300` (release mode = Modbus) |
+| Start/stop remotely | `RemoteStart/StopTransaction` | `X300` — not recommended on Veton chargers (requires taking release away from OCPP) |
 | Live metering | `MeterValues` (configurable interval) | `X232…X250` (poll) or MQTT (push) |
 
 For a **pure current-steering EMS**, Modbus `X301` + the watchdog is simpler and
@@ -25,16 +25,21 @@ speaks OCPP.
 - The OCPP backend URL and identity are set in the charger Web UI, or via the
   CHARX config service (`/api/v1.0/web/ocpp16/...`) / the vetond
   `/api/ocpp/*` endpoints (see [rest-api.md](rest-api.md)).
-- Release mode must be **OCPP** (`X120 = 4`) for the OCPP agent to authorize charging.
+- Release mode must be **OCPP** (`X120 = 4`) for the OCPP agent to authorize charging. Veton chargers ship in this mode — leave it as is.
 - `FreeMode` + `FreeModeUID` let a cached UID auto-authorize on every plug-in
   (no swipe), while still using the OCPP path.
 
-## Combining OCPP + Modbus
+## Combining OCPP + Modbus — the recommended Veton architecture
 
-A common pattern: **OCPP authorizes** (release mode = OCPP) and the **EMS caps
-current via Modbus `X301`**. `X301` works as a ceiling in any release mode, so
-the two coexist — OCPP decides *whether* to charge, the EMS decides *how fast*.
-Remember `X301 = 0` will withhold release regardless of OCPP state.
+This is how Veton chargers are meant to be integrated: **OCPP authorizes**
+(release mode = OCPP, as shipped) and the **EMS caps current via Modbus
+`X301`**. `X301` works as a ceiling in any release mode, so the two coexist —
+OCPP decides *whether* to charge, the EMS decides *how fast*. The EMS must
+**not** take over charging release (`X300`/`X304`): doing so breaks OCPP
+authorization, transaction records/billing, and app/backend visibility.
+
+Keep `X301` within **6–80 A** and **never write 0** — a zero cap withholds
+charging release regardless of OCPP state; to back off, drop to the 6 A minimum.
 
 The OCPP spec and message reference live at
 [openchargealliance.org](https://www.openchargealliance.org/).

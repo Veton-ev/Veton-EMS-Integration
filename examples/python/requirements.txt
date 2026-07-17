@@ -1,5 +1,5 @@
-# Modbus examples (read_state.py, ems_loop.py, charx.py)
-pymodbus>=3.7
+# Modbus examples (read_state.py, ems_loop.py, dual_point.py, charx.py)
+pymodbus>=3.10
 
 # MQTT example (mqtt_monitor.py)
 paho-mqtt>=2.0

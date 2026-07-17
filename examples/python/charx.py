@@ -1,6 +1,6 @@
 """Minimal, dependency-light Modbus client for Veton / Phoenix Contact CHARX.
 
-Reusable core for the examples in this folder. Requires pymodbus >= 3.7
+Reusable core for the examples in this folder. Requires pymodbus >= 3.10
 (``pip install -r requirements.txt``).
 
 Per-charging-point registers are offset by ``connector * 1000``.
@@ -10,6 +10,7 @@ Currents/voltages/power are in milli-units.
 
 from __future__ import annotations
 
+import copy
 import struct
 from dataclasses import dataclass
 
@@ -39,7 +40,7 @@ class ChargerState:
     release_mode: str            # human-readable
     release_mode_code: int       # X120
     max_current_setting_a: int   # X101 (configured cap)
-    present_current_a: int       # X297
+    present_current_a: int       # X297 (current signalled to the vehicle via PWM)
     active_power_w: float        # X244 (mW -> W)
     voltage_v: tuple             # (L1, L2, L3) from X232/234/236
     current_a: tuple             # (L1, L2, L3) from X238/240/242
@@ -53,16 +54,23 @@ class Charx:
         self.base = connector * 1000
         self.unit = unit
         self._c = ModbusTcpClient(host, port=port)
+        self._is_view = False
 
     def __enter__(self):
+        if self._is_view:
+            raise RuntimeError(
+                "use the parent Charx as the context manager; "
+                "point() views share its connection")
         if not self._c.connect():
             raise ConnectionError("could not connect to CHARX Modbus server")
         return self
 
     def __exit__(self, *exc):
+        if self._is_view:
+            return  # a view never closes the shared TCP client
         self._c.close()
 
-    # ``device_id`` is the pymodbus >= 3.7 name; older 3.x used ``slave=``.
+    # ``device_id`` is the pymodbus >= 3.10 name; 3.7-3.9 used ``slave=``.
     def _read(self, addr, count):
         rr = self._c.read_holding_registers(addr, count=count, device_id=self.unit)
         if rr.isError():
@@ -95,6 +103,36 @@ class Charx:
     def read_max_current(self) -> int:
         return self._read(self.base + 301, 1)[0]
 
+    def read_uid(self) -> str:
+        """Controller UID of this charging point (X113, 3 ASCII words)."""
+        return ascii_(self._read(self.base + 113, 3))
+
+    def num_charging_points(self) -> int:
+        """Number of charging controllers in the system (master register 114).
+
+        This is an absolute master-level register (NOT offset by the
+        connector), so it reads the same from any instance. A double
+        charging point reports 2.
+        """
+        return self._read(114, 1)[0]
+
+    def point(self, connector: int) -> "Charx":
+        """A view on another charging point SHARING this TCP connection.
+
+        The master's Modbus server serves every charging point of the charger
+        (register block = connector * 1000), so a single connection can steer
+        them all — preferable to one connection per socket, since the CHARX
+        server serialises requests and accepts few concurrent clients.
+        Do not use the returned view as a context manager; the parent
+        instance owns (and closes) the connection.
+        """
+        if not 1 <= connector <= 48:
+            raise ValueError(f"connector must be 1..48, got {connector}")
+        view = copy.copy(self)          # shares self._c (shallow copy)
+        view.base = connector * 1000
+        view._is_view = True
+        return view
+
     # ── writes ───────────────────────────────────────────────────────
     def set_max_current(self, amps: int, verify: bool = True) -> int:
         """Write X301 (clamped 6-80). Returns the read-back value.
@@ -122,9 +160,17 @@ class Charx:
         self._write(self.base + 307, int(timeout_s))
 
     def set_charge_release(self, enabled: bool) -> None:
-        """Write X300. Only effective when release mode = Modbus (X120 = 5)."""
+        """Write X300. Only effective when release mode = Modbus (X120 = 5).
+
+        Not recommended on Veton chargers — leave charging release to OCPP
+        (see docs/ocpp.md); provided for standalone non-OCPP setups.
+        """
         self._write(self.base + 300, 1 if enabled else 0)
 
     def set_available(self, available: bool) -> None:
-        """Write X304. Only effective when release mode = Modbus (X120 = 5)."""
+        """Write X304. Only effective when release mode = Modbus (X120 = 5).
+
+        Not recommended on Veton chargers — leave charging release to OCPP
+        (see docs/ocpp.md); provided for standalone non-OCPP setups.
+        """
         self._write(self.base + 304, 1 if available else 0)

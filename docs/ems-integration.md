@@ -6,15 +6,22 @@ from **MQTT** and doing one-time setup over **REST**.
 
 ## Two integration patterns
 
-### Pattern A — current capping (recommended default)
-Leave authorization to the charger (OCPP / whitelist / permanent). Your EMS only
-**limits** the charging current by writing `X301`. The car still has to be
-authorized to charge; you decide how fast.
+### Pattern A — current capping (✅ the recommended pattern for Veton chargers)
+Veton chargers ship with **release mode = OCPP** — leave it that way.
+Authorization stays with the charger/backend; your EMS only **limits** the
+charging current by writing `X301`. The car still has to be authorized to
+charge; you decide how fast.
 
-- Pros: minimal config, coexists with existing OCPP/RFID setups, `X301` works in any release mode.
-- Cons: you can't *start* a session from the EMS (the charger's release mode does that).
+- Pros: zero reconfiguration, keeps OCPP authorization/billing/app visibility intact, `X301` works in any release mode.
+- Cons: the EMS can't *start/stop* a session — by design: that is OCPP's job (see [ocpp.md](ocpp.md)).
 
 ### Pattern B — full Modbus control
+
+> ⚠️ **Not recommended on Veton chargers — release/authorization belongs to
+> OCPP.** Switching the release mode to Modbus breaks **OCPP authorization**,
+> **transaction records / billing**, and **app & backend visibility**. Use this
+> pattern only in standalone deployments without an OCPP backend.
+
 Set the charger's **release mode = Modbus** (`X120 = 5`, via Web UI / REST). Now
 your EMS owns charging: `X300` to release, `X301` for current, `X304` for
 availability.
@@ -29,6 +36,12 @@ it across charging points.
 
 - Pros: one number, charger handles fair distribution.
 - Cons: coarser; per-socket control is delegated to the charger.
+- ⚠️ Caveat: register 167 only caps charging points **bound to the first load
+  circuit** in the charger's load-management config. If that circuit has no
+  charging points bound (common when another controller manages the sockets),
+  writes to 167 are accepted but **inert**. Verify the binding via REST:
+  `GET :1603/api/v1.0/loadmanagement/load_circuits` — `charging_points[]` must
+  contain the controller UIDs.
 
 ## The watchdog is mandatory
 
@@ -49,12 +62,12 @@ than the timeout. If the EMS stops petting it, the charger drops to `X306` after
 
 ```
 once at startup:
-  read X120 (release mode); if you need start/stop, ensure it is Modbus(5)
+  leave the release mode as it is (OCPP on Veton chargers) — the EMS only caps current
   arm watchdog:  write X306 = 6,  write X307 = 30
 
 every N seconds (N << X307, e.g. 5 s):
   read state:   X299 vehicle status, X244 power, X250 energy, X238/240/242 currents
-  decide:       target_A = your_ems_policy(...)        # clamp to [6, 80] or 0 to pause
+  decide:       target_A = your_ems_policy(...)        # clamp to [6, 80]; to back off, go to the 6 A minimum — do NOT write 0
   write X301 = target_A
   read back X301; if it didn't stick, re-write (see float-bug)
   write X307 = 30                                      # pet the watchdog
@@ -75,26 +88,59 @@ Use `X299` (or MQTT `iec_61851_state`) to know what the car is doing:
 | `A1/A2` | no vehicle connected | no |
 | `B1` | connected, not ready | no |
 | `B2` | connected, ready (EVSE permitted, relay still open) | no |
-| `C1` | charging paused (relay closed, current 0) | yes |
+| `C1` | vehicle ready, charging paused by EVSE (no PWM offered) — no current flows | **no (paused)** |
 | `C2` | charging active | yes |
-| `D1/D2` | charging, ventilation required | yes |
+| `D1` | as `C1` but ventilation required (IEC 61851 completeness — CHARX does not report D states on `X299`) | **no (paused)** |
+| `D2` | charging active, ventilation required (IEC 61851 completeness — CHARX does not report D states on `X299`) | yes |
 | `E0/F0/IN` | fault / unavailable / invalid | no |
 
 A vehicle only draws current in `C2`/`D2`. Setting `X301` low in `B2` simply caps
 the current the car will be allowed once it starts.
 
-## Multiple charging points
+## Double charging points (master/slave)
 
-Every per-CP register is offset by `connector × 1000`. To control point 2, use
-`2300/2301/2306/2307`; for point 3, `3300/3301/...`. Read the controller list
-(Modbus `X113` per CP, or `GET /api/v1.0/charging-controllers`) to map UIDs to
-charging-point numbers. Arm a watchdog **per charging point**.
+A multi-socket Veton charger (e.g. a two-socket unit) is internally several
+CHARX charging controllers: one is the server (**master**), the others are
+clients (**slaves**) attached to it. The key fact for an EMS:
+
+**There is only one Modbus server — the master's IP, `:502` — and it serves
+all charging points.** Charging point *n* lives at register block `n × 1000`
+(a master can serve up to 48 points). You never connect to a slave directly.
+
+For a double charger:
+
+| Register | Socket 1 | Socket 2 |
+|---|---|---|
+| Vehicle state `X299` | `1299` | `2299` |
+| Current cap `X301` | `1301` | `2301` |
+| Watchdog fallback `X306` | `1306` | `2306` |
+| Watchdog timeout `X307` | `1307` | `2307` |
+
+- **Discovery:** master register `114` = number of charging controllers in the
+  system. Per-CP `X113` (3 words, ASCII) is that controller's UID; REST
+  `GET :5555/api/v1.0/charging-controllers` maps UIDs too.
+- **Watchdog per charging point:** arm `X306`/`X307` at every CP's offset.
+- **The sockets share one supply feed — splitting the budget is on you.** The
+  **sum of the `X301` values must respect the supply**: your EMS divides the
+  budget itself (see the example below), or you delegate to the charger's
+  internal load management via master register **167** — with the load-circuit
+  caveat from [Pattern C](#pattern-c--site-budget-via-internal-lm).
+- **MQTT:** charging points on a slave controller republish under
+  `device-network/<slave-id>/charging_controllers/<uid>/…`.
+
+A runnable, commented budget-splitting demo:
+[examples/python/dual_point.py](../examples/python/dual_point.py).
 
 ## Gotchas checklist
 
 - **Arm the watchdog.** Non-negotiable for any current-setting EMS.
-- **`X301 = 0` withholds release** in every mode — use it to pause, but know it's not "0 A trickle".
-- **`X300`/`X304` need release mode = Modbus.** `X301` does not.
+- **Never write `X301 = 0`.** A zero cap withdraws charging release — that is
+  release control by the back door, and it interacts badly with the float-bug:
+  a stuck retained 0 leaves the charger refusing to charge
+  (`ERR_STATE_NO_AVAILABLE_CURRENT`). To pause, drop to the 6 A minimum;
+  stopping a session is OCPP's job.
+- **Leave release to OCPP** — don't drive `X300`/`X304` on Veton chargers.
+  `X301` caps current in every release mode; that's all an EMS needs.
 - **Read `X301` back** — some firmware resets an externally-written `X301` to 0 (the "float-bug"); re-issue, and power-cycle the controller if it persists.
 - **MQTT `control/*` writes do nothing** — display only. Control via Modbus/REST.
 - **MSW-first** word order for 32/64-bit values.

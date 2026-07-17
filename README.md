@@ -15,16 +15,20 @@ build a safe control loop — with runnable code examples.
 
 | Interface | Direction | Use it for | Notes |
 |---|---|---|---|
-| **[Modbus TCP](docs/modbus.md)** (`:502`) | read + **write** | The primary EMS path: read metering/status, set current (X301), drive release (X300), arm the safety watchdog (X306/X307) | Always available. Recommended for control. |
+| **[Modbus TCP](docs/modbus.md)** (`:502`) | read + **write** | The primary EMS path: read metering/status, set current (X301), arm the safety watchdog (X306/X307) | Always available on Veton-provisioned chargers. Recommended for control. |
 | **[Local MQTT](docs/mqtt.md)** (`:1883`) | **read only** | Cheap, push-based per-charging-point metering (real V/I/P/energy) + plug/charge state | Publishing to `control/*` is **display-only — it does not control the charger.** FW ≥ 1.8 closes 1883 by default. |
 | **[CHARX REST API](docs/rest-api.md)** (`:5555` / `:1603` / `:80`) | read + write | Configuration: load-management config, control flags, restart services | `:5555`/`:1603` are local & unauthenticated; `:80` is the authenticated Web API. |
 | **[vetond HTTP API](docs/rest-api.md#vetond-http-api-8080)** (`:8080`) | read + write | If the Veton agent is installed: sessions, power history, solar/EMS config, live CP state, a proxy to all of the above | JSON over HTTP, JWT for writes. |
 | **[OCPP 1.6](docs/ocpp.md)** | read + write | Authorization + smart-charging profiles via your OCPP backend | Use if you already run an OCPP CSMS. |
 
+> **Port availability:** on factory firmware ≥ 1.8 the charger's firewall allows
+> only `:80`/`:443` until it is provisioned — on Veton-provisioned chargers
+> `:502` (and typically `:1883`/`:5555`) are open.
+
 ## Which one should I use?
 
 - **Cap/steer charging current from an EMS** → **Modbus** `X301` + the watchdog. Start here: [docs/ems-integration.md](docs/ems-integration.md).
-- **Start/stop charging from the EMS** → Modbus `X300`, which requires the charger's **release mode = Modbus** (see [release modes](docs/modbus.md#release-modes)).
+- **Start/stop & authorization** → stays with **OCPP** on Veton chargers (they ship with release mode = OCPP). OCPP decides *whether* a car may charge; the EMS only decides *how fast* via `X301`. Don't drive release (`X300`) from the EMS — see [docs/ocpp.md](docs/ocpp.md).
 - **Just read live power/energy per charging point** → **MQTT** (push, ~5 s) or Modbus (poll).
 - **Feed a site-wide budget and let the charger distribute it** → Modbus master register **167** (cooperates with CHARX internal load management).
 
@@ -35,6 +39,7 @@ cd examples/python
 pip install -r requirements.txt
 python read_state.py 192.168.0.50 --connector 1      # print live charger state
 python ems_loop.py   192.168.0.50 --connector 1      # safe demo control loop
+python dual_point.py 192.168.0.50 --budget 32        # double charging point: split one budget across two sockets
 ```
 
 ## ⚠️ Safety first — arm the watchdog
