@@ -1,0 +1,9 @@
+# gitleaks fingerprints (commit:file:rule:line) that CI's whole-history scan may skip. Each entry pins
+# ONE line in ONE immutable commit; the same value re-added in a new commit is flagged again.
+# Never list a real value that is still in the tree — move it out and rotate it instead.
+#
+# --- triaged 2026-08-29 (kit rules renamed: veton-password-literal / veton-next-line-literal / veton-sshpass)
+# KNOWN: C-005 CHARX manufacturer web password (legacy vendor default) — pre-existing, rotation tracked in veton-handbook/60-access/credential-inventory.md
+25d93ef64fea7210dc43da8c3493e4b8a568e662:docs/rest-api.md:veton-password-literal:57
+25d93ef64fea7210dc43da8c3493e4b8a568e662:examples/curl/rest-examples.sh:veton-password-literal:40
+25d93ef64fea7210dc43da8c3493e4b8a568e662:examples/curl/rest-examples.sh:veton-password-literal:57
