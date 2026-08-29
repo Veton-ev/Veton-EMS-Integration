@@ -36,9 +36,13 @@ bash examples/curl/rest-examples.sh                          # edit HOST first
 python3 -m py_compile examples/python/*.py && bash -n examples/curl/rest-examples.sh
 # build: none (no build step)
 ```
-CI: **none** — there is no `.github/workflows/` directory. Target state: a `ci.yml` (job id
-`ci`) running the compile check above + a link check + gitleaks; see
-`veton-handbook/HANDOVER-PLAN.md` Phase 4. Until then nothing gates a push.
+CI (since 2026-08-26): `.github/workflows/ci.yml`, job id `ci`, every push/PR — **secret scan
+only** (`gitleaks git --config .gitleaks.toml --exit-code 1 --log-opts=--all .`, whole history;
+public repo, so a leak here is public within minutes). The compile check above is NOT in CI yet —
+run it yourself before pushing. Locally: `git config core.hooksPath .githooks` once per clone
+enables the same scan as a pre-commit hook; `.claude/settings.json` + `.claude/hooks/guard.sh`
+fence agents off `git push` to main and force pushes. Branch protection (require `ci`) is a
+GitHub setting still to be clicked.
 
 ## Deploy
 **Not deployed.** Not in the 2026-08-26 deploy survey
@@ -46,6 +50,7 @@ CI: **none** — there is no `.github/workflows/` directory. Target state: a `ci
 `main`; GitHub renders it. No trigger, no smoke check; rollback = revert the commit.
 Blast radius of a bad change: external integrators (and HA-Veton / Veton-Loxone users) follow
 wrong register numbers or, worse, an unsafe control pattern — nothing on the fleet changes.
+Path to `main`: PR with the `ci` check green (secret scan); agents cannot push to `main` directly.
 
 ## Talks to (seams)
 - **CHARX Modbus register map** (X301 setpoint, X306/X307 watchdog, `n×1000` per charging
